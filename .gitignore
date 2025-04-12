@@ -1,6 +1,9 @@
 # Object files
 *.o
-
+.idea
+src/build/*
+!src/build/*.a
+!src/build/*.so
 # Temp files
 nohup.out
 

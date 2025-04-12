@@ -15,6 +15,13 @@
 #ifndef VOSK_BATCH_MODEL_H
 #define VOSK_BATCH_MODEL_H
 
+//#ifdef __cplusplus
+//extern "C" {
+//#endif
+//#ifdef __cplusplus
+//}
+//#endif
+
 #include "base/kaldi-common.h"
 #include "util/common-utils.h"
 #include "fstext/fstext-lib.h"

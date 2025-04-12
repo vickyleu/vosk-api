@@ -12,6 +12,8 @@ HAVE_ACCELERATE=0
 HAVE_CUDA?=0
 # Compiler
 CXX?=g++
+AR?=ar
+STRIP?=strip
 EXT?=so
 # Extra
 EXTRA_CFLAGS?=
@@ -33,13 +35,18 @@ VOSK_HEADERS= \
 	spk_model.h \
 	vosk_api.h \
         postprocessor.h
+# -g
+CFLAGS= -O3 -std=c++17 -Wno-deprecated-declarations -fPIC -DFST_NO_DYNAMIC_LINKING -I. -I$(KALDI_ROOT)/src -I$(OPENFST_ROOT)/include $(EXTRA_CFLAGS)
 
-CFLAGS=-g -O3 -std=c++17 -Wno-deprecated-declarations -fPIC -DFST_NO_DYNAMIC_LINKING -I. -I$(KALDI_ROOT)/src -I$(OPENFST_ROOT)/include $(EXTRA_CFLAGS)
+OBJECTS = $(patsubst %.cc,$(OUTDIR)/%.o,$(VOSK_SOURCES))
+
 
 LDFLAGS=
 
 ifeq ($(USE_SHARED), 0)
     LIBS = \
+        $(KALDI_ROOT)/src/chain/kaldi-chain.a \
+        $(KALDI_ROOT)/src/nnet2/kaldi-nnet2.a \
         $(KALDI_ROOT)/src/online2/kaldi-online2.a \
         $(KALDI_ROOT)/src/decoder/kaldi-decoder.a \
         $(KALDI_ROOT)/src/ivector/kaldi-ivector.a \
@@ -104,13 +111,95 @@ ifeq ($(HAVE_CUDA), 1)
     LDFLAGS += -L$(CUDA_ROOT)/lib64 -lcuda -lcublas -lcusparse -lcudart -lcurand -lcufft -lcusolver -lnvToolsExt
 endif
 
+LDFLAGS +=  -Wl,--strip-debug
+
+# 添加ARMv7架构指定
+CFLAGS += -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard
+
+
+# 默认目标
 all: $(OUTDIR)/libvosk.$(EXT)
 
-$(OUTDIR)/libvosk.$(EXT): $(VOSK_SOURCES:%.cc=$(OUTDIR)/%.o) $(LIBS)
-	$(CXX) --shared -s -o $@ $^ $(LDFLAGS) $(EXTRA_LDFLAGS)
+$(OUTDIR)/libvosk.$(EXT): $(OBJECTS)
+	@find $(OUTDIR) -name '*.o' -exec $(OBJCOPY) --strip-symbol=lsame_ {} \;
 
+	@echo "=> 解压必要的库..."
+	@mkdir  -p  "$(OUTDIR)/libs"
+	@cur_dir=`pwd` && \
+	for lib in $(LIBS); do \
+		if [ -f "$$lib" ]; then \
+			cd "$$cur_dir" && \
+			libname=`basename $$lib | sed 's/\.a$$//'` && \
+			echo "处理库: $$libname (路径: $$lib)" && \
+			mkdir -p "$(OUTDIR)/tmp/$$libname" && \
+			cp "$$lib" "$(OUTDIR)/libs/" && \
+			(cd "$(OUTDIR)/tmp/$$libname" && $(AR) x "$$lib" && \
+			for f in *.o; do mv "$$f" "$${libname}_$$f"; done) ; \
+		else \
+			echo "错误: 找不到库文件 $$lib" && \
+			exit 1 ; \
+		fi ; \
+	done
+
+	@echo "=> 移除冲突符号..."
+	@find "$(OUTDIR)/tmp/libblas" -name 'libblas_lsame*.o' -exec sh -c '$(OBJCOPY)  --strip-symbol=lsame_  "{}"' \;
+	@find "$(OUTDIR)/tmp/libopenblas" -name '*.o' -exec sh -c '$(OBJCOPY)  --strip-symbol=lsame_  --strip-symbol=c_abs --strip-symbol=dcabs1_ --strip-symbol=scabs1_ --strip-symbol=z_abs "{}"' \;
+	@find "$(OUTDIR)/tmp/libf2c" -name '*.o' -exec sh -c '$(OBJCOPY) --strip-symbol=main "{}"' \;
+
+
+	@echo "=> 处理缺少的.note.GNU-stack段..."
+	@echo "" | $(AS) -o temp_stack.o -c -   # 生成临时汇编目标文件
+	@for obj in $$(find "$(OUTDIR)/tmp" -name "*.o"); do \
+    if ! $(OBJDUMP) -h "$$obj" 2>/dev/null | grep -q '.note.GNU-stack'; then \
+        $(OBJCOPY) --add-section .note.GNU-stack=temp_stack.o "$$obj"; \
+    fi; \
+	done
+	@rm -f temp_stack.o
+
+	@echo "=> 将所有处理好的.o文件移动到$(OUTDIR)/tmp"
+	@find $(OUTDIR)/tmp -name '*.o' -exec mv {} $(OUTDIR)/tmp \;
+	$(AR) rcs $@ $(OBJECTS)  $$(ls $(OUTDIR)/tmp/*.o 2>/dev/null)
+	@echo "=> 处理库: libvosk.$(EXT) (路径: $@)"
+	@$(CXX)  $(CFLAGS)  -static-libstdc++ -static-libgcc  -o $@ $^  -L$(KALDI_ROOT)/libs $(LDFLAGS) $(EXTRA_LDFLAGS)
+
+
+	$(STRIP) --strip-debug $@
+	@echo "处理完成. 请检查新库是否满足预期."
+	@echo "构建成功! 输出文件: $@"
+	@echo "优化后大小: $$(du -h $@ | cut -f1)"
+	@echo "=> 清理临时文件..."
+	@rm -rf $(OUTDIR)/tmp  $(OUTDIR)/*.o
+	@mkdir -p $(OUTDIR)/tmp
+
+#	@echo "=> 启动静态库极致瘦身流程"
+#	# 备份原始文件
+#	@cp $@ $@.bak 2>/dev/null || true
+#	# 阶段1：解包并处理目标文件
+#	@echo "解包并处理目标文件..."
+#	@cd $(OUTDIR)/tmp && \
+#	$(AR) x ../$(notdir $@) 2>/dev/null || true && \
+#    find . -name '*.o' -exec $(OBJCOPY) \
+#        --compress-debug-sections=zlib \
+#        --strip-symbol=.L* \
+#        --remove-section=.comment \
+#        --remove-section=.note* {} \;
+#
+#	# 阶段2：瘦身后重新打包
+#	@echo "重建Thin Archive..."
+#	@$(AR) crs --thin $@.2 $(OUTDIR)/tmp/*.o
+#
+#	# 精准文件大小统计（兼容交叉编译环境）
+#	@echo "优化后大小: $$(stat -f '%z' $@ | numfmt --to=iec --suffix=B --format='%.2f')"
+#	@echo "优化后大小: $$(stat -f '%z' $@.2 | numfmt --to=iec --suffix=B --format='%.2f')"
+#	@echo "处理完成. 请检查新库是否满足预期."
+#	@echo "构建成功! 输出文件: $@"
+
+	@rm -rf $(OUTDIR)/tmp
+
+# 编译源文件为目标文件
 $(OUTDIR)/%.o: %.cc $(VOSK_HEADERS)
-	$(CXX) $(CFLAGS) -c -o $@ $<
+	@mkdir -p $(OUTDIR)
+	$(CXX) $(CFLAGS) -c -o $@  $<
 
 clean:
 	rm -f *.o *.so *.dll
