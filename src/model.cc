@@ -322,7 +322,7 @@ void Model::ReadDataFiles()
         kaldi::WordBoundaryInfoNewOpts opts;
         winfo_ = new kaldi::WordBoundaryInfo(opts, winfo_rxfilename_);
     }
-
+    KALDI_LOG << "stat(carpa_rxfilename_.c_str(), &buffer) == 0";
     if (stat(carpa_rxfilename_.c_str(), &buffer) == 0) {
 
         KALDI_LOG << "Loading subtract G.fst model from " << std_fst_rxfilename_;
@@ -330,7 +330,7 @@ void Model::ReadDataFiles()
         KALDI_LOG << "Loading CARPA model from " << carpa_rxfilename_;
         ReadKaldiObject(carpa_rxfilename_, &const_arpa_);
     }
-
+    KALDI_LOG << "RNNLM Rescoring";
     // RNNLM Rescoring
     if (stat(rnnlm_lm_rxfilename_.c_str(), &buffer) == 0) {
         KALDI_LOG << "Loading RNNLM model from " << rnnlm_lm_rxfilename_;
@@ -355,7 +355,7 @@ void Model::ReadDataFiles()
 
         rnnlm_enabled_ = true;
     }
-
+    KALDI_LOG << "完成啦";
 }
 
 void Model::Ref() 

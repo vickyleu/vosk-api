@@ -12,6 +12,7 @@ HAVE_ACCELERATE=0
 HAVE_CUDA?=0
 # Compiler
 CXX?=g++
+CC?=gcc
 AR?=ar
 STRIP?=strip
 EXT?=so
@@ -35,14 +36,16 @@ VOSK_HEADERS= \
 	spk_model.h \
 	vosk_api.h \
         postprocessor.h
-# -g
-CFLAGS= -O3 -std=c++17 -Wno-deprecated-declarations -fPIC -DFST_NO_DYNAMIC_LINKING -I. -I$(KALDI_ROOT)/src -I$(OPENFST_ROOT)/include $(EXTRA_CFLAGS)
+# -g 为调试符号
+CFLAGS= -g -O3 -std=c++17 -Wno-deprecated-declarations -fPIC -DFST_NO_DYNAMIC_LINKING -I. -I$(KALDI_ROOT)/src -I$(OPENFST_ROOT)/include $(EXTRA_CFLAGS)
 
 OBJECTS = $(patsubst %.cc,$(OUTDIR)/%.o,$(VOSK_SOURCES))
 
 
-LDFLAGS=
-
+LDFLAGS= -lpthread -ldl -lm -lrt -Wl,-rpath,$(OUTDIR)
+ifeq ($(USE_SHARED), 0)
+LDFLAGS += -Wl,--whole-archive
+endif
 ifeq ($(USE_SHARED), 0)
     LIBS = \
         $(KALDI_ROOT)/src/chain/kaldi-chain.a \
@@ -66,6 +69,32 @@ ifeq ($(USE_SHARED), 0)
         $(KALDI_ROOT)/src/base/kaldi-base.a \
         $(OPENFST_ROOT)/lib/libfst.a \
         $(OPENFST_ROOT)/lib/libfstngram.a
+
+    CFLAGS += -I$(KALDI_ROOT)/src \
+            -I$(KALDI_ROOT)/src/chain/ \
+            -I$(KALDI_ROOT)/src/nnet2/ \
+            -I$(KALDI_ROOT)/src/online2/ \
+            -I$(KALDI_ROOT)/src/decoder/ \
+            -I$(KALDI_ROOT)/src/ivector/ \
+            -I$(KALDI_ROOT)/src/gmm/ \
+            -I$(KALDI_ROOT)/src/tree/ \
+            -I$(KALDI_ROOT)/src/feat/ \
+            -I$(KALDI_ROOT)/src/lat/ \
+            -I$(KALDI_ROOT)/src/lm/ \
+            -I$(KALDI_ROOT)/src/rnnlm/ \
+            -I$(KALDI_ROOT)/src/hmm/ \
+            -I$(KALDI_ROOT)/src/nnet3/ \
+            -I$(KALDI_ROOT)/src/transform/ \
+            -I$(KALDI_ROOT)/src/cudamatrix/ \
+            -I$(KALDI_ROOT)/src/matrix/ \
+            -I$(KALDI_ROOT)/src/fstext/ \
+            -I$(KALDI_ROOT)/src/util/ \
+            -I$(KALDI_ROOT)/src/base/
+    LDFLAGS += \
+        -lchain -lnnet2 -lonline2 -ldecoder -livector -lgmm -ltree \
+        -lfeat -llat -llm -lrnnlm -lhmm -lnnet3 \
+        -ltransform -lcudamatrix -lmatrix -lfstext \
+        -lutil -lbase -lfst -lfstngram
 else
     LDFLAGS += \
         -L$(KALDI_ROOT)/libs \
@@ -74,7 +103,7 @@ else
         -lkaldi-transform -lkaldi-cudamatrix -lkaldi-matrix -lkaldi-fstext \
         -lkaldi-util -lkaldi-base -lfst -lfstngram
 endif
-
+#-lf2c -llapack -lblas
 ifeq ($(HAVE_OPENBLAS_CLAPACK), 1)
     CFLAGS += -I$(OPENBLAS_ROOT)/include
     ifeq ($(USE_SHARED), 0)
@@ -83,6 +112,8 @@ ifeq ($(HAVE_OPENBLAS_CLAPACK), 1)
             $(OPENBLAS_ROOT)/lib/liblapack.a \
             $(OPENBLAS_ROOT)/lib/libblas.a \
             $(OPENBLAS_ROOT)/lib/libf2c.a
+       LDFLAGS += \
+           -lf2c   -lblas  -llapack  -lopenblas
     else
         LDFLAGS += -lopenblas -llapack -lblas -lf2c
     endif
@@ -111,6 +142,10 @@ ifeq ($(HAVE_CUDA), 1)
     LDFLAGS += -L$(CUDA_ROOT)/lib64 -lcuda -lcublas -lcusparse -lcudart -lcurand -lcufft -lcusolver -lnvToolsExt
 endif
 
+ifeq ($(USE_SHARED), 0)
+LDFLAGS += -Wl,--no-whole-archive
+endif
+
 LDFLAGS +=  -Wl,--strip-debug
 
 # 添加ARMv7架构指定
@@ -132,7 +167,8 @@ $(OUTDIR)/libvosk.$(EXT): $(OBJECTS)
 			libname=`basename $$lib | sed 's/\.a$$//'` && \
 			echo "处理库: $$libname (路径: $$lib)" && \
 			mkdir -p "$(OUTDIR)/tmp/$$libname" && \
-			cp "$$lib" "$(OUTDIR)/libs/" && \
+			newlibname=`echo $$libname | sed 's/^kaldi-/lib/'` && \
+            cp "$$lib" "$(OUTDIR)/libs/$$newlibname.a" && \
 			(cd "$(OUTDIR)/tmp/$$libname" && $(AR) x "$$lib" && \
 			for f in *.o; do mv "$$f" "$${libname}_$$f"; done) ; \
 		else \
@@ -158,12 +194,15 @@ $(OUTDIR)/libvosk.$(EXT): $(OBJECTS)
 
 	@echo "=> 将所有处理好的.o文件移动到$(OUTDIR)/tmp"
 	@find $(OUTDIR)/tmp -name '*.o' -exec mv {} $(OUTDIR)/tmp \;
-	$(AR) rcs $@ $(OBJECTS)  $$(ls $(OUTDIR)/tmp/*.o 2>/dev/null)
+	@$(CC) -c -march=armv7-a -mfpu=neon -mfloat-abi=hard  dummy_main.c -o $(OUTDIR)/dummy_main.o
+	$(AR) rcs  $@  $(OBJECTS)  $(OUTDIR)/dummy_main.o  $$(ls $(OUTDIR)/tmp/*.o 2>/dev/null)
+	# 然后链接
+	# @$(CXX) $(CFLAGS) -static-libstdc++ -static-libgcc -u MAIN__ -Wl,--allow-multiple-definition -o  $@  -L$(OUTDIR)/libs -Wl,--exclude-libs,liblapack.a:libblas.a:libf2c.a $(LDFLAGS) $(EXTRA_LDFLAGS)
+
+	@$(STRIP) --strip-debug $@
 	@echo "=> 处理库: libvosk.$(EXT) (路径: $@)"
-	@$(CXX)  $(CFLAGS)  -static-libstdc++ -static-libgcc  -o $@ $^  -L$(KALDI_ROOT)/libs $(LDFLAGS) $(EXTRA_LDFLAGS)
 
 
-	$(STRIP) --strip-debug $@
 	@echo "处理完成. 请检查新库是否满足预期."
 	@echo "构建成功! 输出文件: $@"
 	@echo "优化后大小: $$(du -h $@ | cut -f1)"
